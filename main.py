@@ -1,8 +1,10 @@
 import json
 import os
+import csv
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
@@ -20,6 +22,23 @@ DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").strip().lower() in (
     "yes",
     "on",
 )
+CSV_FILE = os.getenv("CSV_FILE", "price_history.csv")
+
+CSV_HEADERS = [
+    "timestamp",
+    "inside_pp_eur",
+    "inside_pp_gbp",
+    "inside_total_eur",
+    "inside_total_gbp",
+    "outside_pp_eur",
+    "outside_pp_gbp",
+    "outside_total_eur",
+    "outside_total_gbp",
+    "balcony_pp_eur",
+    "balcony_pp_gbp",
+    "balcony_total_eur",
+    "balcony_total_gbp",
+]
 
 
 def debug_log(message):
@@ -29,6 +48,70 @@ def debug_log(message):
 
 def parse_money(text):
     return float(text.replace("£", "").replace(",", ""))
+
+
+def append_best_prices_to_csv(room_results):
+    row = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "inside_pp_eur": "",
+        "inside_pp_gbp": "",
+        "inside_total_eur": "",
+        "inside_total_gbp": "",
+        "outside_pp_eur": "",
+        "outside_pp_gbp": "",
+        "outside_total_eur": "",
+        "outside_total_gbp": "",
+        "balcony_pp_eur": "",
+        "balcony_pp_gbp": "",
+        "balcony_total_eur": "",
+        "balcony_total_gbp": "",
+    }
+
+    room_key_map = {
+        "Inside": (
+            "inside_pp_eur",
+            "inside_pp_gbp",
+            "inside_total_eur",
+            "inside_total_gbp",
+        ),
+        "Outside": (
+            "outside_pp_eur",
+            "outside_pp_gbp",
+            "outside_total_eur",
+            "outside_total_gbp",
+        ),
+        "Balcony": (
+            "balcony_pp_eur",
+            "balcony_pp_gbp",
+            "balcony_total_eur",
+            "balcony_total_gbp",
+        ),
+    }
+
+    for room_name, fields in room_key_map.items():
+        room_data = room_results.get(room_name)
+        if not room_data:
+            continue
+
+        best_pp, best_total = room_data["best"]
+        best_pp_eur, best_total_eur = room_data["best_eur"]
+
+        pp_eur_field, pp_gbp_field, total_eur_field, total_gbp_field = fields
+        row[pp_gbp_field] = parse_money(best_pp)
+        row[total_gbp_field] = parse_money(best_total)
+        row[pp_eur_field] = round(best_pp_eur, 2) if best_pp_eur is not None else ""
+        row[total_eur_field] = (
+            round(best_total_eur, 2) if best_total_eur is not None else ""
+        )
+
+    file_exists = os.path.exists(CSV_FILE)
+    should_write_header = (not file_exists) or os.path.getsize(CSV_FILE) == 0
+
+    with open(CSV_FILE, "a", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=CSV_HEADERS)
+        if should_write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def gbp_to_eur(amount):
@@ -291,7 +374,7 @@ def get_prices(driver):
 def main():
     debug_log("Application startup")
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless=new")
+    #options.add_argument("--headless=new")
 
     driver = webdriver.Chrome(options=options)
 
@@ -312,6 +395,9 @@ def main():
                     print(
                         f"[BEST] {room}: {format_best_price(best_ppp, best_ppp_eur)} | {format_best_price(best_total, best_total_eur)}"
                     )
+
+                append_best_prices_to_csv(room_results)
+                debug_log(f"Appended best prices snapshot to CSV: {CSV_FILE}")
             except Exception as e:
                 print(f"[ERROR] {e}")
                 debug_log(f"Top-level cycle failed with error: {e}")
