@@ -14,6 +14,17 @@ load_dotenv()
 URL = os.getenv("URL")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL"))
 EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY")
+DEBUG_LOGGING = os.getenv("DEBUG_LOGGING", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def debug_log(message):
+    if DEBUG_LOGGING:
+        print(f"[DEBUG] {message}")
 
 
 def parse_money(text):
@@ -22,9 +33,11 @@ def parse_money(text):
 
 def gbp_to_eur(amount):
     if amount is None:
+        debug_log("Skipping GBP->EUR conversion because amount is None")
         return None
 
     if not EXCHANGE_RATE_API_KEY:
+        debug_log("Skipping GBP->EUR conversion because EXCHANGE_RATE_API_KEY is missing")
         return None
 
     url = (
@@ -32,14 +45,18 @@ def gbp_to_eur(amount):
     )
 
     try:
+        debug_log(f"Requesting GBP->EUR conversion for amount {amount}")
         with urllib.request.urlopen(url, timeout=15) as response:
             payload = json.loads(response.read().decode("utf-8"))
 
         if payload.get("result") != "success":
+            debug_log(f"Exchange API returned non-success result: {payload.get('result')}")
             return None
 
+        debug_log("GBP->EUR conversion request succeeded")
         return float(payload.get("conversion_result"))
     except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TypeError):
+        debug_log("GBP->EUR conversion request failed")
         return None
 
 
@@ -67,14 +84,17 @@ def get_fare_error_message(driver):
 
 def wait_for_prices_or_error(driver, timeout=20):
     wait = WebDriverWait(driver, timeout)
+    debug_log(f"Waiting up to {timeout}s for prices or fare error")
 
     def condition(current_driver):
         error_message = get_fare_error_message(current_driver)
         if error_message:
+            debug_log(f"Fare error detected while waiting: {error_message}")
             return ("error", error_message)
 
         rows = current_driver.find_elements(By.CSS_SELECTOR, ".category-price-table-row")
         if rows:
+            debug_log(f"Detected {len(rows)} price rows while waiting")
             return ("prices", True)
 
         return False
@@ -94,6 +114,7 @@ def get_all_room_types(wait, driver):
     for name, tab_id in room_tabs:
         try:
             print(f"\n--- Checking {name} ---")
+            debug_log(f"Opening room tab {name} ({tab_id})")
 
             tab = wait.until(
                 EC.element_to_be_clickable(
@@ -106,8 +127,10 @@ def get_all_room_types(wait, driver):
             time.sleep(2)
 
             wait.until(lambda d: has_populated_prices(d))
+            debug_log(f"Price table populated for room type {name}")
 
             prices = extract_prices(wait)
+            debug_log(f"Extracted {len(prices)} price options for room type {name}")
 
             if prices:
                 print(f"{name} prices:")
@@ -128,9 +151,11 @@ def get_all_room_types(wait, driver):
                 )
             else:
                 print(f"{name}: No prices found")
+                debug_log(f"No valid prices found for room type {name}")
 
         except Exception as e:
             print(f"{name}: ERROR {e}")
+            debug_log(f"Room type {name} failed with error: {e}")
 
     return results
 
@@ -147,6 +172,10 @@ def extract_prices(wait):
         try:
             cells = row.find_elements(By.CSS_SELECTOR, ".category-price-cell-table")
 
+            if len(cells) < 2:
+                debug_log("Skipping row because fewer than 2 price cells were found")
+                continue
+
             price_per_person = cells[0].find_element(
                 By.CSS_SELECTOR, "strong[data-ody-id='TotalPrice']"
             ).text
@@ -156,11 +185,13 @@ def extract_prices(wait):
             ).text
 
             if not price_per_person.strip() or not cabin_total.strip():
+                debug_log("Skipping row because one or more price fields are empty")
                 continue
 
             results.append((price_per_person, cabin_total))
 
-        except:
+        except Exception as exc:
+            debug_log(f"Failed to extract one price row: {exc}")
             continue
 
     return results
@@ -190,6 +221,7 @@ def has_populated_prices(driver):
     return False
 
 def get_prices(driver):
+    debug_log("Starting price retrieval cycle")
     driver.get(URL)
     wait = WebDriverWait(driver, 20)
 
@@ -198,7 +230,9 @@ def get_prices(driver):
             EC.element_to_be_clickable((By.ID, "CybotCookiebotDialogBodyButtonAccept"))
         )
         cookie_button.click()
-    except:
+        debug_log("Cookie consent accepted")
+    except Exception:
+        debug_log("Cookie consent dialog not found or not clickable")
         pass
 
     guests_dropdown = wait.until(
@@ -207,10 +241,12 @@ def get_prices(driver):
         )
     )
     Select(guests_dropdown).select_by_value(os.getenv("GUEST_AMOUNT"))
+    debug_log(f"Selected guest amount: {os.getenv('GUEST_AMOUNT')}")
 
     time.sleep(1)
 
     ages = os.getenv("GUEST_AGES").split(",")
+    debug_log(f"Applying guest ages: {ages}")
 
     for i, age in enumerate(ages):
         age_input = wait.until(
@@ -227,11 +263,13 @@ def get_prices(driver):
         )
     )
     continue_button.click()
+    debug_log("Submitted guest selection and waiting for fares")
 
     wait_result = wait_for_prices_or_error(driver)
 
     if wait_result[0] == "error":
         print(f"[ERROR] {wait_result[1]}")
+        debug_log("Fare retrieval ended with a stop alert")
         return None
 
     all_results = get_all_room_types(wait, driver)
@@ -251,6 +289,7 @@ def get_prices(driver):
 
 
 def main():
+    debug_log("Application startup")
     options = webdriver.ChromeOptions()
     options.add_argument("--headless=new")
 
@@ -262,6 +301,7 @@ def main():
                 room_results = get_prices(driver)
                 if not room_results:
                     print("Waiting for next attempt...\n")
+                    debug_log("No room results in this cycle; will retry")
                     time.sleep(CHECK_INTERVAL)
                     continue
 
@@ -274,6 +314,7 @@ def main():
                     )
             except Exception as e:
                 print(f"[ERROR] {e}")
+                debug_log(f"Top-level cycle failed with error: {e}")
 
             print(f"Waiting {CHECK_INTERVAL} seconds...\n")
             time.sleep(CHECK_INTERVAL)
